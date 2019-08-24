@@ -1,0 +1,130 @@
+---
+title: "RNAseq data_edgeR"
+author: "Vinothkumar Rajan"
+date: '2018-10-16'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Citation for edgeR: Robinson MD, McCarthy DJ, Smyth GK (2010). “edgeR: a Bioconductor package for differential expression analysis of digital gene expression data.” Bioinformatics, 26(1), 139-140.
+
+McCarthy, J. D, Chen, Yunshun, Smyth, K. G (2012). “Differential expression analysis of multifactor RNA-Seq experiments with respect to biological variation.” Nucleic Acids Research, 40(10), 4288-4297.
+
+Ref: https://www.bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf
+http://www.nathalievialaneix.eu/doc/html/solution_edgeR-tomato-withcode.html
+
+
+```{r}
+source("https://bioconductor.org/biocLite.R")
+BiocManager::install("HTSFilter")
+
+```
+
+
+```{r setup, include=FALSE}
+library(edgeR)
+library(HTSFilter)
+library(org.Dr.eg.db)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(clusterProfiler)
+library(ggsci)
+library(tidyr)
+library(plyr)
+library(viridis)
+library(ggthemes)
+```
+
+
+```{r dataload}
+setwd("~/Desktop/Nandini RNAseq")
+data<-read.csv("raw_counts.csv")
+n_data<-data[-1]
+row.names(n_data) <- data$X
+rawCountTable<-data.matrix(n_data, rownames.force = "automatic")
+sampleInfo <- read.table("design.csv", header=TRUE, sep=",", row.names=1)
+```
+
+## Including Plots
+
+```{r, echo=FALSE}
+dgeFull <- DGEList(rawCountTable, group=sampleInfo$Condition)
+plotMDS(dgeFull, col=rep(1:2, each=3))
+```
+
+```{r, echo=FALSE}
+pseudoCounts <- log2(dgeFull$counts+1)
+boxplot(pseudoCounts, col="gray", xlab="", ylab="Log2 counts per million", las=3)
+```
+
+```{r}
+dgeFull <- DGEList(dgeFull$counts[apply(dgeFull$counts, 1, sum) != 0, ], group=dgeFull$samples$group)
+dgeFull <- calcNormFactors(dgeFull, method="TMM")
+dgeFull$samples
+```
+
+```{r}
+dgeFull <- estimateCommonDisp(dgeFull)
+dgeFull <- estimateTagwiseDisp(dgeFull)
+dgeFull$samples$group <- relevel(dgeFull$samples$group, ref="WT")
+dgeTest <- exactTest(dgeFull)
+filtData <- HTSFilter(dgeFull)$filteredData
+```
+
+```{r}
+dgeTestFilt <- exactTest(filtData)
+resFilt <- topTags(dgeTestFilt, n=nrow(dgeTest$table))
+sigReg <- resFilt$table[resFilt$table$FDR<0.05,]
+write.csv(sigReg, file="Significant-edgeR.csv")
+
+diffexp<-as.data.frame(resFilt)
+
+mutateddf <- mutate(diffexp, sig=ifelse(diffexp$FDR<0.05, "Sig", "Not Sig"))
+input <- cbind(gene=rownames(resFilt), mutateddf ) 
+
+colnames(input)[1] <- "ENSEMBL"
+
+ids <- bitr(input$ENSEMBL, fromType="ENSEMBL", toType="SYMBOL", OrgDb="org.Dr.eg.db", drop = FALSE)
+
+input<-merge(input, ids, by="ENSEMBL")
+input<-arrange(input, FDR)
+muscle<-read.csv("Muscle enriched genes.csv")
+input<-merge(input, muscle, by="ENSEMBL", all=TRUE)
+input<-arrange(input, FDR)
+input_m<-subset(input, Muscle.Specific=="Yes")
+
+
+```
+
+```{r plot}
+input$sig<-as.factor(as.character(input$sig))
+input_fg<-subset(input, sig=="Sig")
+
+volc = ggplot(input, aes(logFC, -log10(PValue))) + geom_point(color = "grey", alpha = 0.3)+ geom_point(data = input_fg, aes(colour = sig)) + ggtitle("Synpo2 RNASeq") + theme_bw() +theme(legend.position="none")+xlab("log2 synpo2b ko/synpo2b wt")+ ylab("-log10 p value")
+
+volc+geom_text_repel(data=subset(input, Muscle.Specific == "Yes"), aes(label=SYMBOL), size = 4, box.padding = unit(0.5, "lines"),point.padding = unit(0.3, "lines"))+scale_y_sqrt(breaks= c(2, 5, 10, 20, 40, 50))+scale_color_futurama()
+
+```
+
+```{r heatmap}
+heatdf<-dgeFull$pseudo.counts
+ENSEMBL <- rownames(heatdf)
+rownames(heatdf) <- NULL
+headdf <- cbind(ENSEMBL,heatdf)
+heatdf<-as.data.frame(data)
+heatmu_df<-merge(headdf, muscle, by="ENSEMBL", all=TRUE)
+heatmu_df<-subset(heatmu_df,heatmu_df$Muscle.Specific=="Yes")
+heat_plot<-heatmu_df[,c(2,3,4,5,6,7,8)]
+heat_plot<-heat_plot[,c(7,6,5,4,3,2,1)]
+heat_plot<-gather(heat_plot, Genotype, Expression, -Gene)
+heat_plot$Expression<-as.numeric(heat_plot$Expression)
+heat_plot <- ddply(heat_plot, .(Gene), transform, Expression = scale(Expression))
+
+
+
+p<-ggplot(heat_plot, aes(x=Genotype, y= reorder(Gene, -Expression))) + geom_tile(aes(fill = Expression), size=0.25)+ scale_fill_viridis(option="D",values = NULL, space = "Lab", na.value = "white", guide = "colourbar", aesthetics = "fill") + theme_tufte(base_family="Helvetica")+ theme(plot.background=element_blank(),panel.border=element_rect(fill=NA, color = "black", size=0.5, linetype="solid"), axis.text.x = element_text(angle = 90, hjust = 1, size=8)) + labs(fill = "Normalized Expression", x="",y="")+ coord_equal()+theme(axis.ticks=element_blank())+theme(legend.title=element_text(size=8))+ theme(legend.text=element_text(size=8))+theme(legend.position="right")
+
+plot(p)
+```
